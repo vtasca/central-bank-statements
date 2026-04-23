@@ -1,0 +1,45 @@
+name: Update Release Calendar
+
+on:
+  # Quarterly: Jan 1 and Jul 1 at 09:00 UTC
+  schedule:
+    - cron: "0 9 1 1 *"
+    - cron: "0 9 1 7 *"
+  workflow_dispatch:
+
+jobs:
+  update-calendar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Update release calendar
+        run: uv run python update_release_calendar.py
+
+      - name: Commit updated calendar
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add release_calendar.txt
+          if git diff --cached --quiet; then
+            echo "No calendar changes."
+          else
+            git commit -m "calendar: update release dates ($(date -u +%Y-%m-%d))"
+            git push
+          fi

@@ -102,13 +102,15 @@ class FedScraper(BaseScraper):
         title = (soup.find("title") or soup.find("h1") or soup.find("h2"))
         title_text = title.get_text(" ", strip=True) if title else ""
 
-        # Fed pages wrap body content in #content or .col-xs-12.col-sm-8
-        content = (
-            soup.find("div", id="content")
-            or soup.find("div", class_=re.compile(r"col-xs-12"))
-            or soup.find("article")
-            or soup.body
-        )
+        # Statements/minutes: body text is in div#article > div[2] (3rd top-level child).
+        # This matches the extraction used by fed-statement-scraping and skips
+        # the heading div[0] and the sidebar div[1].
+        article = soup.find("div", id="article")
+        if article:
+            body_divs = article.find_all("div", recursive=False)
+            content = body_divs[2] if len(body_divs) > 2 else article
+        else:
+            content = soup.find("div", id="content") or soup.body
         text = content.get_text("\n", strip=True) if content else ""
 
         date_iso = _extract_8digit_date(url)

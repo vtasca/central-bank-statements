@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 
 from bs4 import BeautifulSoup
 
@@ -9,49 +11,33 @@ from scrapers.base import BaseScraper
 
 logger = logging.getLogger(__name__)
 
+_CALENDAR_PATH = Path(__file__).resolve().parent.parent / "schedules" / "meeting_calendar.json"
+
 
 class SNBScraper(BaseScraper):
     """Swiss National Bank scraper.
 
-    Press releases (quarterly monetary policy assessments):
-      snb.ch/en/publications/communication/press-releases/
+    Monetary policy assessment press releases are published at:
+      snb.ch/en/publications/communication/press-releases-restricted/pre_{YYYYMMDD}
+
+    The public listing page is JS-rendered and useless for indexing.
+    Instead we drive from the meeting calendar and try each known date.
     """
 
     bank_id = "snb"
     base_url = "https://www.snb.ch"
     rate_limit_seconds = 2.0
 
-    PRESS_INDEX = "https://www.snb.ch/en/publications/communication/press-releases/"
-
     def get_document_index(self) -> list[dict]:
-        seen: set[str] = set()
+        dates = _load_snb_dates()
         docs: list[dict] = []
 
-        try:
-            resp = self.fetch(self.PRESS_INDEX)
-            soup = BeautifulSoup(resp.text, "lxml")
-            for a in soup.find_all("a", href=True):
-                href: str = a["href"]
-                if not href.startswith("http"):
-                    href = self.base_url + ("" if href.startswith("/") else "/") + href
-                # SNB monetary policy press releases contain "snb-news" or specific paths
-                # Filter to monetary policy assessment press releases
-                link_text = a.get_text(strip=True).lower()
-                is_mpa = any(kw in link_text for kw in (
-                    "monetary policy assessment",
-                    "quarterly assessment",
-                    "interest rate",
-                ))
-                if not is_mpa:
-                    continue
-                if href not in seen:
-                    seen.add(href)
-                    date = _snb_url_date(href)
-                    docs.append({"url": href, "doc_type": "statement", "meeting_date": date})
-        except Exception:
-            logger.warning("SNB press index unavailable", exc_info=True)
+        for date in dates:
+            compact = date.replace("-", "")  # YYYYMMDD
+            url = f"{self.base_url}/en/publications/communication/press-releases-restricted/pre_{compact}"
+            docs.append({"url": url, "doc_type": "statement", "meeting_date": date})
 
-        logger.info("SNB index: %d documents found", len(docs))
+        logger.info("SNB index: %d candidate dates", len(docs))
         return docs
 
     def scrape_document(self, url: str, doc_type: str) -> dict:
@@ -84,12 +70,22 @@ class SNBScraper(BaseScraper):
         }
 
 
+def _load_snb_dates() -> list[str]:
+    if not _CALENDAR_PATH.exists():
+        return []
+    with _CALENDAR_PATH.open() as f:
+        data = json.load(f)
+    snb_data = data.get("snb", {})
+    dates: list[str] = []
+    for key, val in snb_data.items():
+        if key.isdigit() and isinstance(val, list):
+            dates.extend(val)
+    return sorted(dates)
+
+
 def _snb_url_date(url: str) -> str:
     m = re.search(r"(\d{8})", url)
     if m:
         d = m.group(1)
         return f"{d[:4]}-{d[4:6]}-{d[6:]}"
-    m2 = re.search(r"(\d{4})/(\d{2})/", url)
-    if m2:
-        return f"{m2.group(1)}-{m2.group(2)}-01"
     return ""

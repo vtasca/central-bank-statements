@@ -91,8 +91,9 @@ class RBAScraper(BaseScraper):
         )
         text = content.get_text("\n", strip=True) if content else ""
 
-        # Try to detect date from URL
-        date = _rba_media_release_date(url) or _rba_minutes_date(url) or ""
+        # dc.date meta tag (present on media-releases pages)
+        meta_date = soup.find("meta", attrs={"name": "dc.date"})
+        date = (meta_date["content"] if meta_date else None) or _rba_minutes_date(url) or ""
 
         return {
             "bank_id": self.bank_id,
@@ -109,20 +110,21 @@ class RBAScraper(BaseScraper):
 
 
 def _rba_media_release_date(url: str) -> str:
-    # mr-24-01.html → need to map to approximate date; the index page has link text
-    # Best effort: return empty, the scraper will parse the page
-    m = re.search(r"mr-(\d{2})-(\d{2})\.html", url)
-    if m:
-        year = 2000 + int(m.group(1))
-        # We can't determine month from the URL alone; return year only
-        return f"{year}-01-01"
+    # URL only has year (mr-26-08.html), so return empty and let scrape_document
+    # extract the real date from the dc.date meta tag.
     return ""
 
 
 def _rba_minutes_date(url: str) -> str:
-    # rba-board-minutes-20240205.html or /2024/rba-board-minutes-20240205.html
-    m = re.search(r"(\d{8})", url)
+    # 2015+ format: /2015/2015-12-01.html  (ISO date with dashes)
+    m_iso = re.search(r"/(\d{4})-(\d{2})-(\d{2})\.html", url)
+    if m_iso:
+        return f"{m_iso.group(1)}-{m_iso.group(2)}-{m_iso.group(3)}"
+    # 2011-2014 format: /2011/06122011.html  (DDMMYYYY)
+    m = re.search(r"/(\d{8})\.html", url)
     if m:
         d = m.group(1)
-        return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        if d[:2] in ("19", "20"):  # YYYYMMDD
+            return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        return f"{d[4:]}-{d[2:4]}-{d[:2]}"  # DDMMYYYY → YYYY-MM-DD
     return ""

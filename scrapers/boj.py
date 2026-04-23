@@ -69,14 +69,19 @@ class BoJScraper(BaseScraper):
                 base = index_url.rsplit("/", 1)[0]
                 href = base + "/" + href.lstrip("/")
 
-            # BoJ PDF statements: mpr{YYYYMMDD}.pdf  or  k{YYYYMMDD}.pdf
-            # BoJ HTML minutes:   minu{YYYYMMDD}.htm
+            # BoJ PDF statements: mpr{YYMMDD}a.pdf  or  k{YYMMDD}.pdf  (6-digit YYMMDD)
+            # BoJ HTML minutes:   minu{YYYYMMDD}.htm  (8-digit YYYYMMDD)
             # BoJ HTML opinions:  opinion{YYYYMMDD}.htm
-            m = re.search(r"(\d{8})\.(pdf|htm)", href, re.I)
+            m = re.search(r"(\d{6,8})[a-z]?\.(pdf|htm)", href, re.I)
             if not m:
                 continue
 
-            date = f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:]}"
+            digits = m.group(1)
+            if len(digits) == 8:
+                date = f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+            else:  # 6-digit YYMMDD — pivot at 50: 50-99 → 19xx, 00-49 → 20xx
+                century = "19" if int(digits[:2]) >= 50 else "20"
+                date = f"{century}{digits[:2]}-{digits[2:4]}-{digits[4:]}"
             docs.append({"url": href, "doc_type": doc_type, "meeting_date": date})
 
         return docs

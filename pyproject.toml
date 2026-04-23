@@ -1,19 +1,12 @@
 [project]
 name = "central-bank-statements"
 version = "0.1.0"
-description = "Scraper for monetary policy documents from 8 major central banks"
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "lxml>=5.1.0",
     "pdfplumber>=0.11.0",
+    "pandas>=2.1.4",
+    "python-dateutil>=2.8.2",
 ]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["scrapers", "pipeline"]

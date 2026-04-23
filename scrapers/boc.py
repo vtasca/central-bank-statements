@@ -25,9 +25,7 @@ class BoCScaper(BaseScraper):
     base_url = "https://www.bankofcanada.ca"
     rate_limit_seconds = 2.0
 
-    DECISION_INDEX = (
-        "https://www.bankofcanada.ca/core-functions/monetary-policy/key-interest-rate/"
-    )
+    DECISION_INDEX = "https://www.bankofcanada.ca/press/press-releases/"
 
     def get_document_index(self) -> list[dict]:
         seen: set[str] = set()
@@ -40,8 +38,8 @@ class BoCScaper(BaseScraper):
                 href: str = a["href"]
                 if not href.startswith("http"):
                     href = self.base_url + ("" if href.startswith("/") else "/") + href
-                # Match BoC FAD statement URLs: /YYYY/MM/fad-statement-...
-                if re.search(r"/\d{4}/\d{2}/fad-statement", href) and href not in seen:
+                # Match both URL formats used by BoC across different eras
+                if re.search(r"/\d{4}/\d{2}/fad-(press-release|statement)", href) and href not in seen:
                     seen.add(href)
                     date = _boc_url_to_date(href)
                     docs.append({"url": href, "doc_type": "statement", "meeting_date": date})
@@ -89,14 +87,18 @@ _MONTH_MAP = {
 
 
 def _boc_url_to_date(url: str) -> str:
-    # /2024/01/fad-statement-january-24-2024/
-    m = re.search(r"/(\d{4})/\d{2}/fad-statement-([a-z]+)-(\d{1,2})-(\d{4})", url)
-    if m:
-        year = m.group(1)
-        month = _MONTH_MAP.get(m.group(2), "01")
-        day = m.group(3).zfill(2)
+    # New format (2015+): /2024/01/fad-press-release-2024-01-24/
+    m_new = re.search(r"fad-press-release-(\d{4})-(\d{2})-(\d{2})", url)
+    if m_new:
+        return f"{m_new.group(1)}-{m_new.group(2)}-{m_new.group(3)}"
+    # Old format: /2024/01/fad-statement-january-24-2024/
+    m_old = re.search(r"/(\d{4})/\d{2}/fad-statement-([a-z]+)-(\d{1,2})-(\d{4})", url)
+    if m_old:
+        year = m_old.group(1)
+        month = _MONTH_MAP.get(m_old.group(2), "01")
+        day = m_old.group(3).zfill(2)
         return f"{year}-{month}-{day}"
-    # Fallback: pull YYYY/MM from path
+    # Fallback: YYYY/MM from path
     m2 = re.search(r"/(\d{4})/(\d{2})/", url)
     if m2:
         return f"{m2.group(1)}-{m2.group(2)}-01"

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 import requests
 
 logger = logging.getLogger(__name__)
+
+_VALID_DOC_TYPES = {
+    "statement", "minutes", "press_conference",
+    "account", "decision", "summary_opinions",
+}
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class BaseScraper(ABC):
@@ -17,9 +23,7 @@ class BaseScraper(ABC):
     base_url: str
     rate_limit_seconds: float = 2.0
 
-    def __init__(self, data_dir: Path, manifest_path: Path) -> None:
-        self.data_dir = data_dir / self.bank_id
-        self.manifest_path = manifest_path
+    def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": (
@@ -28,6 +32,7 @@ class BaseScraper(ABC):
             )
         })
         self._last_request_time: float = 0.0
+        self._csv_cache: pd.DataFrame | None = None
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -39,53 +44,95 @@ class BaseScraper(ABC):
 
     @abstractmethod
     def scrape_document(self, url: str, doc_type: str) -> dict:
-        """Fetch one document and return a normalized dict ready for saving."""
+        """Fetch one document and return a dict with meeting_date, published_date, doc_type, text."""
 
     # ------------------------------------------------------------------
-    # Concrete helpers
+    # CSV state
+    # ------------------------------------------------------------------
+
+    @property
+    def _csv_path(self) -> Path:
+        return _REPO_ROOT / f"communications_{self.bank_id}.csv"
+
+    def _load_csv(self) -> pd.DataFrame:
+        if self._csv_cache is not None:
+            return self._csv_cache
+        if self._csv_path.exists():
+            df = pd.read_csv(self._csv_path)
+        else:
+            df = pd.DataFrame(columns=["Date", "Release Date", "Type", "Text"])
+        self._csv_cache = df
+        return df
+
+    def _most_recent_date(self) -> str | None:
+        df = self._load_csv()
+        if df.empty:
+            return None
+        return df["Date"].max()
+
+    def _already_scraped(self, url: str) -> bool:
+        # URL dedup is not tracked in the CSV; rely on date-based filtering in scrape_new.
+        # This keeps us consistent with the fed repo approach.
+        return False
+
+    def _append_to_csv(self, doc: dict) -> None:
+        row = {
+            "Date": _coerce_date(doc.get("meeting_date", "")),
+            "Release Date": _coerce_date(doc.get("published_date", "")),
+            "Type": doc.get("doc_type", ""),
+            "Text": doc.get("text", ""),
+        }
+        df = self._load_csv()
+        new_row = pd.DataFrame([row])
+        df = pd.concat([df, new_row], ignore_index=True)
+        df = df.sort_values("Date", ascending=False).drop_duplicates(
+            subset=["Date", "Release Date", "Type"]
+        ).reset_index(drop=True)
+        df.to_csv(self._csv_path, index=False)
+        self._csv_cache = df
+
+    # ------------------------------------------------------------------
+    # Scraping orchestration
     # ------------------------------------------------------------------
 
     def scrape_new(self, since_date: str | None = None) -> list[dict]:
-        """Fetch every document not already present in the manifest."""
-        from pipeline.manifest import Manifest
+        """Fetch every document newer than since_date and append to CSV.
 
-        manifest = Manifest(self.manifest_path)
+        Pass since_date=None to scrape all history (full backfill).
+        """
         index = self.get_document_index()
         results: list[dict] = []
 
         for entry in index:
-            url = entry["url"]
-            if manifest.already_scraped(url):
-                logger.debug("skip (already scraped) %s", url)
-                continue
-            if since_date and entry.get("meeting_date", "") < since_date:
+            meeting_date = entry.get("meeting_date", "")
+            if since_date and meeting_date and meeting_date <= since_date:
+                logger.debug("skip (already have up to %s) %s", since_date, entry["url"])
                 continue
             try:
-                doc = self.scrape_document(url, entry["doc_type"])
-                # Index-level meeting_date wins when scraper can't detect it
+                doc = self.scrape_document(entry["url"], entry["doc_type"])
                 if not doc.get("meeting_date"):
-                    doc["meeting_date"] = entry.get("meeting_date", "")
-                filepath = self._save_document(doc)
-                manifest.add(doc, filepath)
+                    doc["meeting_date"] = meeting_date
+                if doc.get("doc_type") not in _VALID_DOC_TYPES:
+                    logger.warning("unknown doc_type %r, skipping", doc.get("doc_type"))
+                    continue
+                self._append_to_csv(doc)
                 results.append(doc)
                 logger.info(
                     "scraped %-10s %-20s %s",
                     self.bank_id,
                     entry["doc_type"],
-                    entry.get("meeting_date", ""),
+                    meeting_date,
                 )
             except Exception:
-                logger.exception("failed to scrape %s", url)
+                logger.exception("failed to scrape %s", entry["url"])
 
         return results
 
-    def already_scraped(self, url: str) -> bool:
-        from pipeline.manifest import Manifest
-
-        return Manifest(self.manifest_path).already_scraped(url)
+    # ------------------------------------------------------------------
+    # HTTP
+    # ------------------------------------------------------------------
 
     def fetch(self, url: str, **kwargs) -> requests.Response:
-        """Rate-limited GET request."""
         elapsed = time.monotonic() - self._last_request_time
         if elapsed < self.rate_limit_seconds:
             time.sleep(self.rate_limit_seconds - elapsed)
@@ -94,51 +141,14 @@ class BaseScraper(ABC):
         resp.raise_for_status()
         return resp
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
 
-    def _save_document(self, doc: dict) -> Path:
-        """Write raw content + JSON sidecar; return path relative to repo root."""
-        from pipeline.normalize import normalize
-
-        doc = normalize(doc)
-
-        doc_dir = self.data_dir / _subdir(doc["doc_type"])
-        doc_dir.mkdir(parents=True, exist_ok=True)
-
-        slug = doc["meeting_date"].replace("-", "")
-
-        if doc["content_type"] == "pdf":
-            raw_path = doc_dir / f"{slug}.pdf"
-            raw_bytes: bytes | None = doc.pop("_raw_bytes", None)
-            if raw_bytes:
-                raw_path.write_bytes(raw_bytes)
-        else:
-            raw_path = doc_dir / f"{slug}.html"
-            raw_html: str | None = doc.pop("_raw_html", None)
-            if raw_html:
-                raw_path.write_text(raw_html, encoding="utf-8")
-
-        # Strip any remaining private keys before writing the sidecar
-        clean = {k: v for k, v in doc.items() if not k.startswith("_")}
-
-        sidecar_path = doc_dir / f"{slug}.json"
-        sidecar_path.write_text(
-            json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-
-        # Path relative to repo root (data_dir is <repo>/data/<bank_id>)
-        repo_root = self.data_dir.parent.parent
-        return sidecar_path.relative_to(repo_root)
-
-
-def _subdir(doc_type: str) -> str:
-    return {
-        "statement": "statements",
-        "minutes": "minutes",
-        "press_conference": "press_conferences",
-        "account": "accounts",
-        "decision": "decisions",
-        "summary_opinions": "summary_opinions",
-    }.get(doc_type, doc_type)
+def _coerce_date(value: str) -> str:
+    if not value:
+        return value
+    # YYYYMMDD → YYYY-MM-DD
+    if len(value) == 8 and value.isdigit():
+        return f"{value[:4]}-{value[4:6]}-{value[6:]}"
+    # YYMMDD → YYYY-MM-DD (assume 2000s)
+    if len(value) == 6 and value.isdigit():
+        return f"20{value[:2]}-{value[2:4]}-{value[4:]}"
+    return value

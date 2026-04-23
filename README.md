@@ -15,100 +15,75 @@ Automated scraper for primary post-meeting communications from 8 major central b
 | **SNB** (Switzerland) | 4 | statement | 2000 | snb.ch |
 | **Riksbank** (Sweden) | 6 | statement, minutes | 2010 | riksbank.se |
 
-Run `python -m pipeline.run` to see live document counts in the manifest summary.
+## Output
 
-## Document schema
+Each bank produces a CSV file at the repo root:
 
-Every scraped document is saved as a JSON sidecar alongside the raw HTML or PDF:
-
-```json
-{
-  "bank_id": "ecb",
-  "doc_type": "statement",
-  "meeting_date": "2025-12-18",
-  "published_date": "2025-12-18",
-  "title": "Monetary policy decisions",
-  "source_url": "https://...",
-  "scraped_at": "2026-04-20T20:00:00+00:00",
-  "language": "en",
-  "content_type": "html",
-  "text": "..."
-}
+```
+communications_fed.csv
+communications_ecb.csv
+communications_boe.csv
+communications_boj.csv
+communications_rba.csv
+communications_boc.csv
+communications_snb.csv
+communications_riksbank.csv
 ```
 
-Valid `doc_type` values: `statement`, `minutes`, `press_conference`, `account`, `decision`, `summary_opinions`.
+Schema (matches [fed-statement-scraping](https://github.com/vtasca/fed-statement-scraping)):
+
+| Column | Description |
+|--------|-------------|
+| `Date` | YYYY-MM-DD of the policy meeting |
+| `Release Date` | YYYY-MM-DD when the document was published |
+| `Type` | `statement`, `minutes`, `press_conference`, `account`, `decision`, `summary_opinions` |
+| `Text` | Extracted plain text of the document |
 
 ## Repo structure
 
 ```
-scrapers/          One module per bank (+ abstract base)
-pipeline/
-  run.py           Entry point — scrape all or specific banks
-  normalize.py     Enforce unified schema
-  manifest.py      CSV index of every scraped document
-data/
-  manifest.csv     Master index: bank, type, date, URL, filepath
-  fed/statements/  {YYYYMMDD}.json + {YYYYMMDD}.html per doc
-  ecb/decisions/
-  ...
+scrapers/                  One module per bank (+ abstract base)
 schedules/
-  meeting_calendar.json   Known meeting dates for all 8 banks (2024-2026)
+  meeting_calendar.json    Known meeting dates for all 8 banks (2024-2026)
+scrape.py                  Entry point
+update_release_calendar.py Rebuilds release_calendar.txt from meeting schedules
+release_calendar.txt       T+1 run dates for all banks (GitHub Actions gate)
+communications_*.csv       Scraped data (one file per bank)
 .github/workflows/
-  scheduled.yml    Daily scrape at 20:00 UTC + manual dispatch
-  backfill.yml     Full historical backfill (manual trigger)
+  main.yml                 Calendar-gated daily scrape at 20:00 UTC
+  update_calendar.yml      Quarterly calendar refresh (Jan 1, Jul 1)
 ```
 
 ## Quick start
 
 ```bash
-# Install dependencies (uv)
 uv sync
 
-# Or with pip
-pip install -r requirements.txt
+# Full historical backfill (all banks)
+uv run python scrape.py --backfill
 
-# Scrape all banks, incremental (skip already-scraped)
-python -m pipeline.run
+# Backfill specific banks
+uv run python scrape.py --banks fed ecb --backfill
 
-# Scrape specific banks
-python -m pipeline.run --banks fed ecb
+# Incremental update (runs only if today is in release_calendar.txt)
+uv run python scrape.py
 
-# Scrape everything since a date
-python -m pipeline.run --since 2025-01-01
-
-# Full historical backfill (all banks, all time)
-python -m pipeline.run --backfill
-
-# Verbose output
-python -m pipeline.run --banks fed --verbose
+# Rebuild release_calendar.txt
+uv run python update_release_calendar.py
 ```
 
 ## GitHub Actions
 
-**Scheduled scrape** (`scheduled.yml`): runs daily at 20:00 UTC, commits any new documents, supports `workflow_dispatch` with optional `banks` and `since` inputs.
+**Scrape** (`main.yml`): runs daily at 20:00 UTC. Checks `release_calendar.txt` and skips if today is not a T+1 release date. Commits updated CSVs if new rows were added. Supports `workflow_dispatch` with optional `banks` and `backfill` inputs.
 
-**Backfill** (`backfill.yml`): manual trigger only, runs with `--backfill` flag, 6-hour timeout, optional `banks` input. Trigger this once to populate the archive.
+**Update calendar** (`update_calendar.yml`): runs quarterly (Jan 1, Jul 1). Fetches live Fed calendar data and reads `schedules/meeting_calendar.json` for other banks. Commits updated `release_calendar.txt` if changed. Can also be triggered manually.
 
 Required repository permissions: `contents: write` (already set in the workflow files).
-
-## Manifest
-
-`data/manifest.csv` tracks every scraped document:
-
-| Column | Description |
-|--------|-------------|
-| `bank_id` | `fed`, `ecb`, `boe`, etc. |
-| `doc_type` | `statement`, `minutes`, etc. |
-| `meeting_date` | YYYY-MM-DD of the policy meeting |
-| `published_date` | YYYY-MM-DD when the document was published |
-| `source_url` | Original URL |
-| `scraped_at` | ISO timestamp of when it was scraped |
-| `filepath` | Relative path to the JSON sidecar |
 
 ## Implementation notes
 
 - **Rate limiting**: 2s delay between requests (configurable per scraper via `rate_limit_seconds`)
-- **Deduplication**: manifest tracks URLs; `scrape_new()` skips anything already present
+- **Deduplication**: new rows are skipped if `meeting_date <= max(Date)` in the existing CSV
 - **PDF extraction**: `pdfplumber` used for BoJ statements and Fed press conference transcripts
 - **HTML parsing**: `lxml` via BeautifulSoup4
 - **ECB**: Uses year-specific `index_include.en.html` files (lazily loaded by the browser) rather than the JS-heavy index pages
@@ -118,7 +93,6 @@ Required repository permissions: `contents: write` (already set in the workflow 
 
 1. Create `scrapers/{bank_id}.py` subclassing `BaseScraper`
 2. Implement `get_document_index()` → list of `{url, doc_type, meeting_date}`
-3. Implement `scrape_document(url, doc_type)` → normalized dict
-4. Register in `pipeline/run.py`'s `SCRAPER_MAP` and `scrapers/__init__.py`
+3. Implement `scrape_document(url, doc_type)` → dict with `meeting_date`, `published_date`, `doc_type`, `text`
+4. Register in `scrape.py`'s `SCRAPER_MAP` and `scrapers/__init__.py`
 5. Add meeting dates to `schedules/meeting_calendar.json`
-6. Create `data/{bank_id}/` subdirectories
